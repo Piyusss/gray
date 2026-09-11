@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="A field of flickering binary digits shaded into a three-dimensional Grey. Move the pointer to sweep the light across the form.">
+<meta name="theme-color" content="#010102">
+<meta property="og:title" content="Binary Grey">
+<meta property="og:description" content="A field of flickering binary digits shaded into a three-dimensional Grey.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23010102'/%3E%3Ctext x='16' y='24' font-size='22' text-anchor='middle' fill='%23f7f8f8'%3E01%3C/text%3E%3C/svg%3E">
+<title>Binary Grey</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #010102;
+    overflow: hidden;
+  }
+
+  #stage {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100dvh;
+    background: #010102;
+    overflow: hidden;
+    cursor: crosshair;
+  }
+
+  #field {
+    position: absolute;
+    inset: 0;
+    display: block;
+  }
+
+  #lens {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 300px;
+    height: 300px;
+    margin: -150px 0 0 -150px;
+    border-radius: 50%;
+    opacity: 0;
+    pointer-events: none;
+    background: radial-gradient(
+      circle,
+      rgba(247, 248, 248, 0.06) 0%,
+      transparent 70%
+    );
+    transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas
+    id="field"
+    role="img"
+    aria-label="A field of flickering binary digits shaded into a three-dimensional Grey alien: a deep tapering cranium, two huge convex black eyes with moving specular glints, vestigial nostril pits, a small creased mouth, a thin neck, collarbones and rounded shoulders. Moving the pointer moves the light across the form."
+  ></canvas>
+  <div id="lens" aria-hidden="true"></div>
+  <p class="sr-only">
+    The figure is drawn entirely from the characters 0 and 1. Each digit's
+    brightness is the amount of light landing on a modelled surface at that
+    point, so the form reads as solid rather than as a flat outline.
+  </p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("field");
+  var stage = document.getElementById("stage");
+  var lensEl = document.getElementById("lens");
+  var ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var fine = window.matchMedia("(hover: hover) and (pointer: fine)");
+
+  /* ==================================================================
+     A GREY, AS A HEIGHT FIELD
+
+     The figure is modelled as a depth map z(x, y): for every point on
+     the picture plane, how far the surface stands toward the viewer.
+     Shading then comes from the surface normal, which is the gradient
+     of that map — so the volume is real, not painted on.
+
+       x  right,  y  down,  z  toward the viewer
+       1 unit = the figure scale S, derived from the viewport
+
+     Vertical landmarks:
+       -0.76  crown          0.118  nostrils
+       -0.46  brow           0.258  mouth
+       -0.20  eye centres    0.44   chin
+                             0.50   shoulders
+     ================================================================== */
+
+  var HEAD_TOP = -0.76;
+  var HEAD_BOT = 0.44;
+  var HEAD_H = HEAD_BOT - HEAD_TOP;
+
+  var T_WIDEST = 0.33;
+  var W_MAX = 0.44;
+  var W_CHIN = 0.05;
+  var T_ROUND = 0.955;
+
+  function smoothstep(v) {
+    var c = v < 0 ? 0 : v > 1 ? 1 : v;
+    return c * c * (3 - 2 * c);
+  }
+
+  /** Lateral half-width of the skull at height t (0 crown, 1 chin). */
+  function headHalfWidth(t) {
+    if (t <= 0 || t >= 1) return 0;
+    var w;
+    if (t <= T_WIDEST) {
+      var u = t / T_WIDEST;
+      var k = 1 - u;
+      w = W_MAX * Math.sqrt(1 - k * k);
+    } else {
+      var v = (t - T_WIDEST) / (1 - T_WIDEST);
+      w = W_CHIN + (W_MAX - W_CHIN) * Math.pow(Math.max(0, 1 - Math.pow(v, 1.55)), 0.7);
+    }
+    if (t > T_ROUND) {
+      var s = (t - T_ROUND) / (1 - T_ROUND);
+      w *= Math.sqrt(Math.max(0, 1 - s * s));
+    }
+    return w;
+  }
+
+  /**
+   * Front-to-back half-depth as a multiple of the lateral half-width.
+   * The cranium is deeper than it is wide; the jaw is shallow. This ratio
+   * is what stops the head reading as a flat disc.
+   */
+  function headDepthRatio(t) {
+    return 1.12 - 0.34 * smoothstep((t - 0.22) / 0.62);
+  }
+
+  /* ---- eyes: large convex lenses, tilted up toward the temples ---- */
+
+  var EYE_CX = 0.225;
+  var EYE_CY = -0.2;
+  var EYE_A = 0.185;
+  var EYE_B = 0.095;
+  var EYE_TILT = (26 * Math.PI) / 180;
+  var EYE_COS = Math.cos(EYE_TILT);
+  var EYE_SIN = Math.sin(EYE_TILT);
+  var EYE_P = 0.55;
+  var EYE_Q = 0.38;
+  var EYE_PEAK =
+    Math.pow(EYE_P / (EYE_P + EYE_Q), EYE_P) *
+    Math.pow(EYE_Q / (EYE_P + EYE_Q), EYE_Q);
+  var EYE_BULGE = 0.075;
+
+  /**
+   * How far inside the eye a point is: 0 at the rim, 1 at the centre of
+   * the lens. Returns 0 outside. Also drives the lens bulge.
+   */
+  function eyeFactor(x, y) {
+    var dx = Math.abs(x) - EYE_CX;
+    var dy = y - EYE_CY;
+    var X = dx * EYE_COS - dy * EYE_SIN;
+    if (X <= -EYE_A || X >= EYE_A) return 0;
+    var Y = dx * EYE_SIN + dy * EYE_COS;
+
+    var s = (X + EYE_A) / (2 * EYE_A);
+    var hw = (EYE_B * (Math.pow(s, EYE_P) * Math.pow(1 - s, EYE_Q))) / EYE_PEAK;
+    if (hw <= 1e-6) return 0;
+
+    var q = Y / hw;
+    q = 1 - q * q;
+    if (q <= 0) return 0;
+
+    // fade to nothing at the two tips so the lens closes smoothly
+    var taper = Math.pow(4 * s * (1 - s), 0.32);
+    return Math.sqrt(q) * taper;
+  }
+
+  /* ---- mouth and nostrils: creases cut into the surface ---- */
+
+  var MOUTH_Y = 0.258;
+  var MOUTH_HW = 0.078;
+  var NOSE_Y = 0.118;
+  var NOSE_X = 0.045;
+
+  function mouthDepth(x, y) {
+    var u = x / MOUTH_HW;
+    if (u <= -1 || u >= 1) return 0;
+    var k = 1 - u * u;
+    var dy = (y - (MOUTH_Y + 0.011 * k)) / 0.026;
+    if (dy * dy >= 1) return 0;
+    var f = 1 - dy * dy;
+    return 0.011 * Math.sqrt(k) * f * f;
+  }
+
+  function nostrilDepth(x, y) {
+    var dx = (Math.abs(x) - NOSE_X) / 0.020;
+    var dy = (y - NOSE_Y) / 0.029;
+    var d = dx * dx + dy * dy;
+    if (d >= 1) return 0;
+    var f = 1 - d;
+    return 0.013 * f * f;
+  }
+
+  /** A faint ridge down the centre of the face, in place of a nose. */
+  function nasalRidge(x, y) {
+    if (y < -0.12 || y > 0.20) return 0;
+    var fx = x / 0.055;
+    if (fx * fx >= 1) return 0;
+    var fy = smoothstep((y + 0.12) / 0.14) * (1 - smoothstep((y - 0.10) / 0.10));
+    return 0.022 * (1 - fx * fx) * fy;
+  }
+
+  /* ---- head surface ---- */
+
+  var HEAD_Z0 = 0.10;   // the whole head sits forward of the body
+
+  function headZ(x, y) {
+    var t = (y - HEAD_TOP) / HEAD_H;
+    if (t <= 0 || t >= 1) return null;
+    var rx = headHalfWidth(t);
+    if (rx <= 1e-6) return null;
+    var k = x / rx;
+    if (k * k >= 1) return null;
+
+    var rz = rx * headDepthRatio(t);
+    var z = rz * Math.sqrt(1 - k * k) + HEAD_Z0;
+
+    // brow shelf: a shallow step above the eyes
+    z += 0.018 * (1 - smoothstep((y + 0.40) / 0.16)) * (1 - smoothstep(Math.abs(x) / 0.40));
+
+    z += nasalRidge(x, y);
+    z += EYE_BULGE * eyeFactor(x, y);
+    z -= mouthDepth(x, y);
+    z -= nostrilDepth(x, y);
+    return z;
+  }
+
+  /* ---- neck, shoulders, chest ---- */
+
+  var NECK_TOP = 0.36;
+  var NECK_BOT = 0.62;
+
+  function bodyZ(x, y) {
+    var ax = Math.abs(x);
+    var best = null;
+
+    if (y >= NECK_TOP && y <= NECK_BOT) {
+      var s = (y - NECK_TOP) / (NECK_BOT - NECK_TOP);
+      var rn = 0.074 + 0.060 * s * s;
+      if (ax < rn) {
+        best = Math.sqrt(1 - (ax / rn) * (ax / rn)) * rn * 1.15 - 0.10;
+      }
+    }
+
+    if (y >= 0.5) {
+      var u = Math.min(1, (y - 0.5) / 0.4);
+      var w = 0.1 + 0.32 * Math.pow(u, 0.55);
+      if (ax < w) {
+        var k = ax / w;
+        var z = 0.23 * Math.sqrt(1 - k * k) - 0.05;
+
+        // rounded shoulder caps out near the ends
+        var sh = (ax - w * 0.78) / (w * 0.26);
+        if (sh > -1 && sh < 1) z += 0.055 * (1 - sh * sh);
+
+        // collarbone ridges, and the hollow between them
+        var cb = (y - (0.615 + 0.10 * k * k)) / 0.030;
+        if (cb > -1 && cb < 1 && ax < w * 0.92) z += 0.030 * (1 - cb * cb);
+        var st = ax / 0.055;
+        if (st < 1 && y > 0.63) z -= 0.028 * (1 - st * st) * smoothstep((y - 0.63) / 0.10);
+
+        if (best === null || z > best) best = z;
+      }
+    }
+    return best;
+  }
+
+  /* ---- composite: whichever surface is nearest the viewer wins ---- */
+
+  var K_NONE = 0, K_SKIN = 1, K_EYE = 2, K_BODY = 3;
+
+  var _z = 0, _kind = K_NONE;
+
+  function sample(x, y) {
+    var hz = headZ(x, y);
+    var bz = bodyZ(x, y);
+
+    if (hz === null && bz === null) {
+      _kind = K_NONE;
+      _z = 0;
+      return false;
+    }
+    if (hz !== null && (bz === null || hz >= bz)) {
+      _z = hz;
+      _kind = eyeFactor(x, y) > 0 ? K_EYE : K_SKIN;
+      return true;
+    }
+    _z = bz;
+    _kind = K_BODY;
+    return true;
+  }
+
+  /** Depth only, for the finite differences. Background reads as z = 0. */
+  function sampleZOnly(x, y) {
+    var hz = headZ(x, y);
+    var bz = bodyZ(x, y);
+    if (hz === null && bz === null) return 0;
+    if (hz === null) return bz;
+    if (bz === null) return hz;
+    return hz > bz ? hz : bz;
+  }
+
+  /* ==================================================================
+     FIELD STATE
+     Geometry and normals are expensive but static, so they are baked
+     once per resize. Each frame only relights them.
+     ================================================================== */
+
+  var LEVELS = 48;
+  var DIFF_H = 0.007;        // finite-difference step, in figure units
+
+  var w = 0, h = 0, cols = 0, rows = 0, pitch = 14, fontPx = 11;
+  var figS = 1, figCX = 0, figCY = 0;
+  var t = 0, raf = 0, running = false;
+  var enabled = !reduce.matches;
+  var canHover = fine.matches;
+  var baselineRatio = 0.35;
+  var n = 0;
+
+  var bits = new Uint8Array(0);
+  var flipAt = new Float32Array(0);
+  var cellX = new Float32Array(0);      // screen px
+  var cellY = new Float32Array(0);
+  var fx = new Float32Array(0);         // figure units
+  var fy = new Float32Array(0);
+  var fz = new Float32Array(0);
+  var nrmX = new Float32Array(0);
+  var nrmY = new Float32Array(0);
+  var nrmZ = new Float32Array(0);
+  var kind = new Uint8Array(0);
+
+  var levelOf = new Uint8Array(0);
+  var counts = new Uint32Array(LEVELS);
+  var offsets = new Uint32Array(LEVELS);
+  var order = new Uint32Array(0);
+
+  var pointer = { x: -9999, y: -9999, active: false };
+  var last = { x: -9999, y: -9999 };
+
+  var LENS_R = 150;
+  var LENS_R2 = LENS_R * LENS_R;
+  var PUSH_EXP = 0.476;
+  var MAX_SCALE = 1.15;
+
+  // the light is a point in space; it drifts toward the pointer
+  var LIGHT_HOME_X = -0.52, LIGHT_HOME_Y = -0.66;
+  var lightX = LIGHT_HOME_X, lightY = LIGHT_HOME_Y;
+  var LIGHT_Z = 1.25;
+
+  var A_AMBIENT = 0.085;     // the field of digits behind the figure
+
+  var mono =
+    '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+  function measureBaseline() {
+    ctx.font = "100px " + mono;
+    var m = ctx.measureText("0");
+    var a = m.actualBoundingBoxAscent;
+    var d = m.actualBoundingBoxDescent;
+    if (a) baselineRatio = (a - d) / 200;
+  }
+
+  function build() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    w = stage.clientWidth;
+    h = stage.clientHeight;
+    if (!w || !h) return;
+
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    figS = Math.min(h * 0.44, w * 0.6);
+    figCX = w / 2;
+    figCY = h * 0.46;
+
+    pitch = Math.max(9, Math.min(16, figS / 34));
+    fontPx = Math.max(7, Math.round(pitch * 0.76));
+    measureBaseline();
+
+    cols = Math.ceil(w / pitch) + 2;
+    rows = Math.ceil(h / pitch) + 2;
+    n = cols * rows;
+
+    bits = new Uint8Array(n);
+    flipAt = new Float32Array(n);
+    cellX = new Float32Array(n);
+    cellY = new Float32Array(n);
+    fx = new Float32Array(n);
+    fy = new Float32Array(n);
+    fz = new Float32Array(n);
+    nrmX = new Float32Array(n);
+    nrmY = new Float32Array(n);
+    nrmZ = new Float32Array(n);
+    kind = new Uint8Array(n);
+    levelOf = new Uint8Array(n);
+    order = new Uint32Array(n);
+
+    var offX = (w - (cols - 1) * pitch) / 2;
+    var offY = (h - (rows - 1) * pitch) / 2;
+
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var i = r * cols + c;
+        var px = offX + pitch * c;
+        var py = offY + pitch * r;
+        cellX[i] = px;
+        cellY[i] = py;
+
+        bits[i] = Math.random() < 0.5 ? 0 : 1;
+        flipAt[i] = 0.08 + 0.5 * Math.random();
+
+        var X = (px - figCX) / figS;
+        var Y = (py - figCY) / figS;
+        fx[i] = X;
+        fy[i] = Y;
+
+        if (!sample(X, Y)) {
+          kind[i] = K_NONE;
+          continue;
+        }
+        kind[i] = _kind;
+        fz[i] = _z;
+
+        // normal from the gradient of the depth map
+        var zl = sampleZOnly(X - DIFF_H, Y);
+        var zr = sampleZOnly(X + DIFF_H, Y);
+        var zu = sampleZOnly(X, Y - DIFF_H);
+        var zd = sampleZOnly(X, Y + DIFF_H);
+
+        var gx = (zr - zl) / (2 * DIFF_H);
+        var gy = (zd - zu) / (2 * DIFF_H);
+        var nx = -gx, ny = -gy, nz = 1;
+        var len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        nrmX[i] = nx / len;
+        nrmY[i] = ny / len;
+        nrmZ[i] = nz / len;
+      }
+    }
+  }
+
+  /* ---- shading ---- */
+
+  function shade(i) {
+    var nx = nrmX[i], ny = nrmY[i], nz = nrmZ[i];
+
+    var lx = lightX - fx[i];
+    var ly = lightY - fy[i];
+    var lz = LIGHT_Z - fz[i];
+    var ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
+    lx /= ll; ly /= ll; lz /= ll;
+
+    var diff = nx * lx + ny * ly + nz * lz;
+    if (diff < 0) diff = 0;
+
+    // grazing surfaces catch a rim light, which keeps the silhouette alive
+    var g = 1 - nz;
+    var rim = g * g * g;
+
+    var k = kind[i];
+    var lum;
+
+    if (k === K_EYE) {
+      // a dark convex lens: almost no diffuse, one tight specular glint
+      var hx = lx, hy = ly, hz = lz + 1;
+      var hl = Math.sqrt(hx * hx + hy * hy + hz * hz);
+      var sp = (nx * hx + ny * hy + nz * hz) / hl;
+      if (sp < 0) sp = 0;
+      var s2 = sp * sp; var s4 = s2 * s2; var s8 = s4 * s4;
+      var s16 = s8 * s8; var s32 = s16 * s16; var s64 = s32 * s32;
+      lum = 0.035 + 0.10 * diff + 0.95 * s64 + 0.16 * rim;
+    } else if (k === K_BODY) {
+      lum = 0.07 + 0.58 * diff + 0.24 * rim;
+    } else {
+      var hx2 = lx, hy2 = ly, hz2 = lz + 1;
+      var hl2 = Math.sqrt(hx2 * hx2 + hy2 * hy2 + hz2 * hz2);
+      var sp2 = (nx * hx2 + ny * hy2 + nz * hz2) / hl2;
+      if (sp2 < 0) sp2 = 0;
+      var p2 = sp2 * sp2; var p4 = p2 * p2; var p8 = p4 * p4; var p16 = p8 * p8;
+      lum = 0.09 + 0.80 * diff + 0.11 * p16 + 0.28 * rim;
+    }
+
+    return lum > 1 ? 1 : lum;
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, w, h);
+    ctx.font = fontPx + "px " + mono;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+
+    var shift = fontPx * baselineRatio;
+    var lensOn = pointer.active;
+    if (pointer.active) {
+      last.x = pointer.x;
+      last.y = pointer.y;
+    }
+    var lensX = last.x, lensY = last.y;
+
+    // ease the light toward the pointer, or back to its resting corner
+    var tx = LIGHT_HOME_X, ty = LIGHT_HOME_Y;
+    if (pointer.active) {
+      tx = (pointer.x - figCX) / figS;
+      ty = (pointer.y - figCY) / figS;
+      var m = Math.sqrt(tx * tx + ty * ty);
+      if (m > 1.6) { tx = (tx / m) * 1.6; ty = (ty / m) * 1.6; }
+    }
+    lightX += (tx - lightX) * 0.09;
+    lightY += (ty - lightY) * 0.09;
+
+    // bucket every cell by brightness (counting sort) so the frame sets
+    // fillStyle ~48 times instead of once per digit
+    var ambientLevel = Math.round(A_AMBIENT * (LEVELS - 1));
+    counts.fill(0);
+    for (var i = 0; i < n; i++) {
+      var lvl;
+      if (kind[i] === K_NONE) {
+        lvl = ambientLevel;
+      } else {
+        lvl = Math.round(shade(i) * (LEVELS - 1));
+        if (lvl < 0) lvl = 0;
+        else if (lvl > LEVELS - 1) lvl = LEVELS - 1;
+      }
+      levelOf[i] = lvl;
+      counts[lvl]++;
+    }
+    var acc = 0;
+    for (var L = 0; L < LEVELS; L++) {
+      offsets[L] = acc;
+      acc += counts[L];
+    }
+    for (var j = 0; j < n; j++) {
+      order[offsets[levelOf[j]]++] = j;
+    }
+
+    var start = 0;
+    for (var lv = 0; lv < LEVELS; lv++) {
+      var end = offsets[lv];
+      if (lv > 0) start = offsets[lv - 1];
+      else start = 0;
+      if (end <= start) continue;
+      if (lv === 0) continue;           // fully dark cells draw nothing
+
+      ctx.fillStyle =
+        "rgba(247, 248, 248, " + (lv / (LEVELS - 1)).toFixed(3) + ")";
+
+      for (var k = start; k < end; k++) {
+        var idx = order[k];
+
+        if (t >= flipAt[idx]) {
+          bits[idx] = bits[idx] ? 0 : 1;
+          flipAt[idx] = t + 0.08 + 0.5 * Math.random();
+        }
+        var ch = bits[idx] ? "1" : "0";
+        var x = cellX[idx];
+        var y = cellY[idx];
+
+        if (lensOn) {
+          var dx = x - lensX;
+          var dy = y - lensY;
+          var d2 = dx * dx + dy * dy;
+          if (d2 < LENS_R2) {
+            var d = Math.sqrt(d2);
+            var pushed = LENS_R * Math.pow(d / LENS_R, PUSH_EXP);
+            var ang = Math.atan2(dy, dx);
+            var sc = 1 + MAX_SCALE * smoothstep(1 - d / LENS_R);
+            ctx.save();
+            ctx.translate(
+              lensX + Math.cos(ang) * pushed,
+              lensY + Math.sin(ang) * pushed + shift
+            );
+            ctx.scale(sc, sc);
+            ctx.fillText(ch, 0, 0);
+            ctx.restore();
+            continue;
+          }
+        }
+        ctx.fillText(ch, x, y + shift);
+      }
+    }
+
+    if (lensEl) {
+      lensEl.style.opacity = lensOn ? "1" : "0";
+      if (lensOn)
+        lensEl.style.transform = "translate(" + lensX + "px," + lensY + "px)";
+    }
+  }
+
+  function frame() {
+    if (!enabled) return;
+    t += 0.016;
+    draw();
+    raf = requestAnimationFrame(frame);
+  }
+
+  /* ---- pointer ---- */
+
+  function setPointer(clientX, clientY) {
+    var rect = stage.getBoundingClientRect();
+    var x = clientX - rect.left;
+    var y = clientY - rect.top;
+    pointer.x = x;
+    pointer.y = y;
+    pointer.active = x >= 0 && x <= rect.width && y >= 0 && y <= rect.height;
+  }
+
+  function onMouseMove(e) {
+    if (!canHover) return;
+    setPointer(e.clientX, e.clientY);
+  }
+  function onLeave() { pointer.active = false; }
+  function onTouch(e) {
+    var touch = e.touches && e.touches[0];
+    if (touch) setPointer(touch.clientX, touch.clientY);
+  }
+  function onTouchEnd() { pointer.active = false; }
+
+  function bind() {
+    window.addEventListener("mousemove", onMouseMove, { passive: true });
+    document.documentElement.addEventListener("mouseleave", onLeave);
+    stage.addEventListener("touchstart", onTouch, { passive: true });
+    stage.addEventListener("touchmove", onTouch, { passive: true });
+    stage.addEventListener("touchend", onTouchEnd, { passive: true });
+    stage.addEventListener("touchcancel", onTouchEnd, { passive: true });
+  }
+  function unbind() {
+    window.removeEventListener("mousemove", onMouseMove);
+    document.documentElement.removeEventListener("mouseleave", onLeave);
+    stage.removeEventListener("touchstart", onTouch);
+    stage.removeEventListener("touchmove", onTouch);
+    stage.removeEventListener("touchend", onTouchEnd);
+    stage.removeEventListener("touchcancel", onTouchEnd);
+    pointer.active = false;
+    if (lensEl) lensEl.style.opacity = "0";
+  }
+
+  function start() {
+    if (running) return;
+    running = true;
+    bind();
+    raf = requestAnimationFrame(frame);
+  }
+  function stop() {
+    running = false;
+    cancelAnimationFrame(raf);
+    raf = 0;
+    unbind();
+  }
+
+  function rebuild() {
+    build();
+    if (!enabled) draw();
+  }
+
+  build();
+  if (enabled) start();
+  else draw();
+
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(rebuild).observe(stage);
+  } else {
+    window.addEventListener("resize", rebuild);
+  }
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(rebuild);
+  }
+
+  reduce.addEventListener("change", function (e) {
+    enabled = !e.matches;
+    if (enabled) start();
+    else { stop(); draw(); }
+  });
+  fine.addEventListener("change", function (e) {
+    canHover = e.matches;
+    if (!canHover) pointer.active = false;
+  });
+})();
+</script>
+</body>
+</html>
