@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="A ten-second short film rendered entirely in flickering binary digits: a night highway, a descending saucer, an abduction, and the Grey.">
+<meta name="description" content="A field of flickering binary digits shaded into a three-dimensional Grey. Move the pointer to sweep the light across the form.">
 <meta name="theme-color" content="#010102">
-<meta property="og:title" content="Abduction in Binary">
-<meta property="og:description" content="A ten-second short film rendered entirely in flickering binary digits.">
+<meta property="og:title" content="Binary Grey">
+<meta property="og:description" content="A field of flickering binary digits shaded into a three-dimensional Grey.">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23010102'/%3E%3Ctext x='16' y='24' font-size='22' text-anchor='middle' fill='%23f7f8f8'%3E01%3C/text%3E%3C/svg%3E">
-<title>Abduction in Binary</title>
+<title>Binary Grey</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
 
 <style>
@@ -73,15 +73,13 @@
   <canvas
     id="field"
     role="img"
-    aria-label="A ten-second animated short rendered entirely in flickering binary digits: a car drives down a night highway, a flying saucer descends, the car brakes and is lifted into the sky on a beam of light, the saucer streaks away, and the face of a Grey alien fills the frame."
+    aria-label="A field of flickering binary digits shaded into a three-dimensional Grey alien: a deep tapering cranium, two huge convex black eyes with moving specular glints, vestigial nostril pits, a small creased mouth, a thin neck, collarbones and rounded shoulders. Moving the pointer moves the light across the form."
   ></canvas>
   <div id="lens" aria-hidden="true"></div>
   <p class="sr-only">
-    Every frame is drawn with the characters 0 and 1. A small perspective
-    renderer with a depth buffer shades three-dimensional models of the road,
-    the car, the saucer and the alien's head; each digit's brightness is the
-    light landing on whatever surface is nearest at that point. The sequence
-    loops every ten seconds. Move the pointer to magnify the digits.
+    The figure is drawn entirely from the characters 0 and 1. Each digit's
+    brightness is the amount of light landing on a modelled surface at that
+    point, so the form reads as solid rather than as a flat outline.
   </p>
 </div>
 
@@ -99,214 +97,44 @@
   var fine = window.matchMedia("(hover: hover) and (pointer: fine)");
 
   /* ==================================================================
-     1. SMALL MATH
+     A GREY, AS A HEIGHT FIELD
+
+     The figure is modelled as a depth map z(x, y): for every point on
+     the picture plane, how far the surface stands toward the viewer.
+     Shading then comes from the surface normal, which is the gradient
+     of that map — so the volume is real, not painted on.
+
+       x  right,  y  down,  z  toward the viewer
+       1 unit = the figure scale S, derived from the viewport
+
+     Vertical landmarks:
+       -0.76  crown          0.118  nostrils
+       -0.46  brow           0.258  mouth
+       -0.20  eye centres    0.44   chin
+                             0.50   shoulders
      ================================================================== */
 
-  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
-  function smoothstep(v) { var c = clamp(v, 0, 1); return c * c * (3 - 2 * c); }
-  function lerp(a, b, k) { return a + (b - a) * k; }
-  /** normalised progress through [a, b] */
-  function seg(t, a, b) { return clamp((t - a) / (b - a), 0, 1); }
-  function easeOut(k) { return 1 - Math.pow(1 - k, 3); }
-  function easeIn(k) { return k * k * k; }
-  function easeInOut(k) { return k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2; }
+  var HEAD_TOP = -0.76;
+  var HEAD_BOT = 0.44;
+  var HEAD_H = HEAD_BOT - HEAD_TOP;
 
-  /* ==================================================================
-     2. MESH BUILDING
+  var T_WIDEST = 0.33;
+  var W_MAX = 0.44;
+  var W_CHIN = 0.05;
+  var T_ROUND = 0.955;
 
-     A mesh is flat typed arrays: positions, triangle indices, an optional
-     per-vertex normal (for smooth shading) and a per-triangle material.
-     ================================================================== */
-
-  function Mesh() {
-    this.pos = [];      // x,y,z triples
-    this.tri = [];      // index triples
-    this.mat = [];      // material id per triangle
-    this.nrm = null;    // per-vertex normals, built on demand
+  function smoothstep(v) {
+    var c = v < 0 ? 0 : v > 1 ? 1 : v;
+    return c * c * (3 - 2 * c);
   }
 
-  Mesh.prototype.vert = function (x, y, z) {
-    this.pos.push(x, y, z);
-    return this.pos.length / 3 - 1;
-  };
-  Mesh.prototype.face = function (a, b, c, m) {
-    this.tri.push(a, b, c);
-    this.mat.push(m);
-  };
-  Mesh.prototype.quad = function (a, b, c, d, m) {
-    this.face(a, b, c, m);
-    this.face(a, c, d, m);
-  };
-
-  /** Average face normals into per-vertex normals for smooth shading. */
-  Mesh.prototype.smoothNormals = function () {
-    var n = this.pos.length;
-    var nrm = new Float32Array(n);
-    for (var i = 0; i < this.tri.length; i += 3) {
-      var a = this.tri[i] * 3, b = this.tri[i + 1] * 3, c = this.tri[i + 2] * 3;
-      var ux = this.pos[b] - this.pos[a];
-      var uy = this.pos[b + 1] - this.pos[a + 1];
-      var uz = this.pos[b + 2] - this.pos[a + 2];
-      var vx = this.pos[c] - this.pos[a];
-      var vy = this.pos[c + 1] - this.pos[a + 1];
-      var vz = this.pos[c + 2] - this.pos[a + 2];
-      var nx = uy * vz - uz * vy;
-      var ny = uz * vx - ux * vz;
-      var nz = ux * vy - uy * vx;
-      nrm[a] += nx; nrm[a + 1] += ny; nrm[a + 2] += nz;
-      nrm[b] += nx; nrm[b + 1] += ny; nrm[b + 2] += nz;
-      nrm[c] += nx; nrm[c + 1] += ny; nrm[c + 2] += nz;
-    }
-    for (var j = 0; j < n; j += 3) {
-      var l = Math.hypot(nrm[j], nrm[j + 1], nrm[j + 2]) || 1;
-      nrm[j] /= l; nrm[j + 1] /= l; nrm[j + 2] /= l;
-    }
-    this.nrm = nrm;
-    return this;
-  };
-
-  Mesh.prototype.pack = function () {
-    this.pos = new Float32Array(this.pos);
-    this.tri = new Uint16Array(this.tri);
-    this.mat = new Uint8Array(this.mat);
-    return this;
-  };
-
-  /** Axis-aligned box centred on (cx,cy,cz). */
-  function addBox(mesh, cx, cy, cz, sx, sy, sz, m) {
-    var x0 = cx - sx / 2, x1 = cx + sx / 2;
-    var y0 = cy - sy / 2, y1 = cy + sy / 2;
-    var z0 = cz - sz / 2, z1 = cz + sz / 2;
-    var v = [
-      mesh.vert(x0, y0, z0), mesh.vert(x1, y0, z0),
-      mesh.vert(x1, y1, z0), mesh.vert(x0, y1, z0),
-      mesh.vert(x0, y0, z1), mesh.vert(x1, y0, z1),
-      mesh.vert(x1, y1, z1), mesh.vert(x0, y1, z1)
-    ];
-    mesh.quad(v[4], v[5], v[6], v[7], m);   // +z
-    mesh.quad(v[1], v[0], v[3], v[2], m);   // -z
-    mesh.quad(v[5], v[1], v[2], v[6], m);   // +x
-    mesh.quad(v[0], v[4], v[7], v[3], m);   // -x
-    mesh.quad(v[3], v[7], v[6], v[2], m);   // +y
-    mesh.quad(v[0], v[1], v[5], v[4], m);   // -y
-  }
-
-  /** Surface of revolution about the Y axis from a [radius, y] profile. */
-  function addLathe(mesh, profile, segments, m, depthScale) {
-    depthScale = depthScale || 1;
-    var rings = [];
-    for (var p = 0; p < profile.length; p++) {
-      var r = profile[p][0], y = profile[p][1];
-      var ring = [];
-      if (r < 1e-5) {
-        ring.push(mesh.vert(0, y, 0));
-      } else {
-        for (var s = 0; s < segments; s++) {
-          var a = (s / segments) * Math.PI * 2;
-          ring.push(mesh.vert(Math.cos(a) * r, y, Math.sin(a) * r * depthScale));
-        }
-      }
-      rings.push(ring);
-    }
-    for (var i = 0; i < rings.length - 1; i++) {
-      var A = rings[i], B = rings[i + 1];
-      for (var k = 0; k < segments; k++) {
-        var k2 = (k + 1) % segments;
-        if (A.length === 1) mesh.face(A[0], B[k2], B[k], m);
-        else if (B.length === 1) mesh.face(A[k], A[k2], B[0], m);
-        else mesh.quad(A[k], A[k2], B[k2], B[k], m);
-      }
-    }
-  }
-
-  /* ==================================================================
-     3. MATERIALS
-        [ambient, diffuse, emissive, specular]
-     ================================================================== */
-
-  var M_ASPHALT = 0, M_SHOULDER = 1, M_PAINT = 2, M_CAR = 3, M_CAR_DARK = 4,
-      M_GLASS = 5, M_TYRE = 6, M_LAMP = 7, M_HULL = 8, M_HULL_DARK = 9,
-      M_DOME = 10, M_RIMLIGHT = 11, M_SKIN = 12, M_EYE = 13, M_EMITTER = 14;
-
-  var MAT = [];
-  MAT[M_ASPHALT]   = [0.05, 0.22, 0, 0];
-  MAT[M_SHOULDER]  = [0.04, 0.30, 0, 0];
-  MAT[M_PAINT]     = [0.13, 0.30, 0, 0];
-  MAT[M_CAR]       = [0.07, 0.72, 0, 0.30];
-  MAT[M_CAR_DARK]  = [0.05, 0.40, 0, 0];
-  MAT[M_GLASS]     = [0.10, 0.30, 0, 0.55];
-  MAT[M_TYRE]      = [0.03, 0.18, 0, 0];
-  MAT[M_LAMP]      = [0, 0, 1.0, 0];
-  MAT[M_HULL]      = [0.21, 0.72, 0, 0.35];
-  MAT[M_HULL_DARK] = [0.15, 0.38, 0, 0];
-  MAT[M_DOME]      = [0.24, 0.58, 0, 0.45];
-  MAT[M_RIMLIGHT]  = [0, 0, 0.95, 0];
-  MAT[M_SKIN]      = [0.09, 0.80, 0, 0.12];
-  MAT[M_EYE]       = [0.02, 0.07, 0, 0.95];
-  MAT[M_EMITTER]   = [0, 0, 0.50, 0];
-
-  /* ==================================================================
-     4. THE MODELS
-     ================================================================== */
-
-  /* ---- car: a low saloon, nose pointing down -Z ---- */
-  var carMesh = (function () {
-    var m = new Mesh();
-    addBox(m, 0, 0.42, 0, 1.00, 0.46, 2.55, M_CAR);        // body
-    addBox(m, 0, 0.78, 0.10, 0.88, 0.34, 1.25, M_GLASS);   // cabin
-    addBox(m, 0, 0.22, -1.24, 0.94, 0.22, 0.18, M_CAR_DARK); // front valance
-    addBox(m, 0, 0.30, 1.28, 0.94, 0.26, 0.16, M_CAR_DARK);  // rear
-    var wz = [-0.85, 0.92], wx = [-0.52, 0.52];
-    for (var i = 0; i < 2; i++)
-      for (var j = 0; j < 2; j++)
-        addBox(m, wx[j], 0.24, wz[i], 0.12, 0.44, 0.44, M_TYRE);
-    // headlights and tail lights
-    addBox(m, -0.32, 0.44, -1.30, 0.26, 0.14, 0.06, M_LAMP);
-    addBox(m, 0.32, 0.44, -1.30, 0.26, 0.14, 0.06, M_LAMP);
-    addBox(m, -0.34, 0.46, 1.31, 0.22, 0.10, 0.05, M_CAR_DARK);
-    addBox(m, 0.34, 0.46, 1.31, 0.22, 0.10, 0.05, M_CAR_DARK);
-    return m.pack();
-  })();
-
-  /* ---- saucer ---- */
-  var ufoMesh = (function () {
-    var m = new Mesh();
-    addLathe(m, [
-      [0.00, 0.62], [0.22, 0.52], [0.36, 0.40], [0.42, 0.30]
-    ], 28, M_DOME);
-    addLathe(m, [
-      [0.42, 0.30], [0.72, 0.18], [1.05, 0.06], [1.28, 0.00],
-      [1.05, -0.08], [0.66, -0.18], [0.30, -0.26], [0.00, -0.30]
-    ], 28, M_HULL);
-    // emitter ring underneath
-    addLathe(m, [[0.34, -0.25], [0.30, -0.31], [0.00, -0.33]], 20, M_EMITTER);
-    m.smoothNormals();
-    return m.pack();
-  })();
-
-  /* ---- rim lights: small blocks spaced around the widest ring ---- */
-  var rimMesh = (function () {
-    var m = new Mesh();
-    for (var i = 0; i < 12; i++) {
-      var a = (i / 12) * Math.PI * 2;
-      addBox(m, Math.cos(a) * 1.22, 0.0, Math.sin(a) * 1.22, 0.13, 0.09, 0.13, M_RIMLIGHT);
-    }
-    return m.pack();
-  })();
-
-  /* ---- the Grey ----------------------------------------------------
-     Built by revolving the same skull profile used before, with the eye
-     lenses displaced outward along the surface normal, so the head that
-     closes the film is the one from the still.                        */
-
-  var HEAD_TOP = -0.76, HEAD_BOT = 0.44, HEAD_H = HEAD_BOT - HEAD_TOP;
-  var T_WIDEST = 0.33, W_MAX = 0.44, W_CHIN = 0.05, T_ROUND = 0.955;
-
+  /** Lateral half-width of the skull at height t (0 crown, 1 chin). */
   function headHalfWidth(t) {
     if (t <= 0 || t >= 1) return 0;
     var w;
     if (t <= T_WIDEST) {
-      var u = t / T_WIDEST, k = 1 - u;
+      var u = t / T_WIDEST;
+      var k = 1 - u;
       w = W_MAX * Math.sqrt(1 - k * k);
     } else {
       var v = (t - T_WIDEST) / (1 - T_WIDEST);
@@ -318,33 +146,83 @@
     }
     return w;
   }
-  function headDepthRatio(t) { return 1.12 - 0.34 * smoothstep((t - 0.22) / 0.62); }
 
-  var EYE_CX = 0.225, EYE_CY = -0.2, EYE_A = 0.185, EYE_B = 0.095;
+  /**
+   * Front-to-back half-depth as a multiple of the lateral half-width.
+   * The cranium is deeper than it is wide; the jaw is shallow. This ratio
+   * is what stops the head reading as a flat disc.
+   */
+  function headDepthRatio(t) {
+    return 1.12 - 0.34 * smoothstep((t - 0.22) / 0.62);
+  }
+
+  /* ---- eyes: large convex lenses, tilted up toward the temples ---- */
+
+  var EYE_CX = 0.225;
+  var EYE_CY = -0.2;
+  var EYE_A = 0.185;
+  var EYE_B = 0.095;
   var EYE_TILT = (26 * Math.PI) / 180;
-  var EYE_COS = Math.cos(EYE_TILT), EYE_SIN = Math.sin(EYE_TILT);
-  var EYE_P = 0.55, EYE_Q = 0.38;
-  var EYE_PEAK = Math.pow(EYE_P / (EYE_P + EYE_Q), EYE_P) *
-                 Math.pow(EYE_Q / (EYE_P + EYE_Q), EYE_Q);
+  var EYE_COS = Math.cos(EYE_TILT);
+  var EYE_SIN = Math.sin(EYE_TILT);
+  var EYE_P = 0.55;
+  var EYE_Q = 0.38;
+  var EYE_PEAK =
+    Math.pow(EYE_P / (EYE_P + EYE_Q), EYE_P) *
+    Math.pow(EYE_Q / (EYE_P + EYE_Q), EYE_Q);
   var EYE_BULGE = 0.075;
 
+  /**
+   * How far inside the eye a point is: 0 at the rim, 1 at the centre of
+   * the lens. Returns 0 outside. Also drives the lens bulge.
+   */
   function eyeFactor(x, y) {
-    var dx = Math.abs(x) - EYE_CX, dy = y - EYE_CY;
+    var dx = Math.abs(x) - EYE_CX;
+    var dy = y - EYE_CY;
     var X = dx * EYE_COS - dy * EYE_SIN;
     if (X <= -EYE_A || X >= EYE_A) return 0;
     var Y = dx * EYE_SIN + dy * EYE_COS;
+
     var s = (X + EYE_A) / (2 * EYE_A);
     var hw = (EYE_B * (Math.pow(s, EYE_P) * Math.pow(1 - s, EYE_Q))) / EYE_PEAK;
     if (hw <= 1e-6) return 0;
+
     var q = Y / hw;
     q = 1 - q * q;
     if (q <= 0) return 0;
-    return Math.sqrt(q) * Math.pow(4 * s * (1 - s), 0.32);
+
+    // fade to nothing at the two tips so the lens closes smoothly
+    var taper = Math.pow(4 * s * (1 - s), 0.32);
+    return Math.sqrt(q) * taper;
   }
 
-  function browShelf(x, y) {
-    return 0.018 * (1 - smoothstep((y + 0.40) / 0.16)) * (1 - smoothstep(Math.abs(x) / 0.40));
+  /* ---- mouth and nostrils: creases cut into the surface ---- */
+
+  var MOUTH_Y = 0.258;
+  var MOUTH_HW = 0.078;
+  var NOSE_Y = 0.118;
+  var NOSE_X = 0.045;
+
+  function mouthDepth(x, y) {
+    var u = x / MOUTH_HW;
+    if (u <= -1 || u >= 1) return 0;
+    var k = 1 - u * u;
+    var dy = (y - (MOUTH_Y + 0.011 * k)) / 0.026;
+    if (dy * dy >= 1) return 0;
+    var f = 1 - dy * dy;
+    return 0.011 * Math.sqrt(k) * f * f;
   }
+
+  function nostrilDepth(x, y) {
+    var dx = (Math.abs(x) - NOSE_X) / 0.020;
+    var dy = (y - NOSE_Y) / 0.029;
+    var d = dx * dx + dy * dy;
+    if (d >= 1) return 0;
+    var f = 1 - d;
+    return 0.013 * f * f;
+  }
+
+  /** A faint ridge down the centre of the face, in place of a nose. */
   function nasalRidge(x, y) {
     if (y < -0.12 || y > 0.20) return 0;
     var fx = x / 0.055;
@@ -352,488 +230,171 @@
     var fy = smoothstep((y + 0.12) / 0.14) * (1 - smoothstep((y - 0.10) / 0.10));
     return 0.022 * (1 - fx * fx) * fy;
   }
-  function mouthCrease(x, y) {
-    var u = x / 0.078;
-    if (u <= -1 || u >= 1) return 0;
-    var k = 1 - u * u;
-    var dy = (y - (0.258 + 0.011 * k)) / 0.026;
-    if (dy * dy >= 1) return 0;
-    var f = 1 - dy * dy;
-    return 0.011 * Math.sqrt(k) * f * f;
+
+  /* ---- head surface ---- */
+
+  var HEAD_Z0 = 0.10;   // the whole head sits forward of the body
+
+  function headZ(x, y) {
+    var t = (y - HEAD_TOP) / HEAD_H;
+    if (t <= 0 || t >= 1) return null;
+    var rx = headHalfWidth(t);
+    if (rx <= 1e-6) return null;
+    var k = x / rx;
+    if (k * k >= 1) return null;
+
+    var rz = rx * headDepthRatio(t);
+    var z = rz * Math.sqrt(1 - k * k) + HEAD_Z0;
+
+    // brow shelf: a shallow step above the eyes
+    z += 0.018 * (1 - smoothstep((y + 0.40) / 0.16)) * (1 - smoothstep(Math.abs(x) / 0.40));
+
+    z += nasalRidge(x, y);
+    z += EYE_BULGE * eyeFactor(x, y);
+    z -= mouthDepth(x, y);
+    z -= nostrilDepth(x, y);
+    return z;
   }
-  function nostrilPit(x, y) {
-    var dx = (Math.abs(x) - 0.045) / 0.020, dy = (y - 0.118) / 0.029;
-    var d = dx * dx + dy * dy;
-    if (d >= 1) return 0;
-    var f = 1 - d;
-    return 0.013 * f * f;
-  }
 
-  var headMesh = (function () {
-    var m = new Mesh();
-    var RINGS = 34, SEG = 40;
-    var rings = [], eyeMask = [];
+  /* ---- neck, shoulders, chest ---- */
 
-    for (var i = 0; i <= RINGS; i++) {
-      var t = i / RINGS;
-      var fy = HEAD_TOP + t * HEAD_H;   // face coords: +y is down
-      var y = -fy;                      // world coords: +y is up
-      var rx = headHalfWidth(t);
-      var rz = rx * headDepthRatio(t);
-      var ring = [], mask = [];
+  var NECK_TOP = 0.36;
+  var NECK_BOT = 0.62;
 
-      if (rx < 1e-4) {
-        ring.push(m.vert(0, y, 0));
-        mask.push(0);
-      } else {
-        for (var s = 0; s < SEG; s++) {
-          var a = (s / SEG) * Math.PI * 2;
-          var ca = Math.cos(a), sa = Math.sin(a);
-          var x = ca * rx, z = sa * rz;
+  function bodyZ(x, y) {
+    var ax = Math.abs(x);
+    var best = null;
 
-          // facial relief only applies to the front of the head
-          var front = clamp(sa, 0, 1);
-          var ef = front > 0 ? eyeFactor(x, fy) : 0;
-          var disp =
-            front *
-            (browShelf(x, fy) + nasalRidge(x, fy) - mouthCrease(x, fy) - nostrilPit(x, fy)) +
-            EYE_BULGE * ef * front;
-
-          // push out along the ellipse's own outward direction
-          var ox = ca, oz = sa;
-          var ol = Math.hypot(ox, oz) || 1;
-          ring.push(m.vert(x + (ox / ol) * disp, y, z + (oz / ol) * disp));
-          mask.push(ef > 0.02 && front > 0.25 ? 1 : 0);
-        }
-      }
-      rings.push(ring);
-      eyeMask.push(mask);
-    }
-
-    for (var r = 0; r < RINGS; r++) {
-      var A = rings[r], B = rings[r + 1];
-      var MA = eyeMask[r], MB = eyeMask[r + 1];
-      for (var k = 0; k < SEG; k++) {
-        var k2 = (k + 1) % SEG;
-        var isEye =
-          (A.length === 1 ? 0 : MA[k] + MA[k2]) + (B.length === 1 ? 0 : MB[k] + MB[k2]);
-        var mm = isEye >= 3 ? M_EYE : M_SKIN;
-        if (A.length === 1) m.face(A[0], B[k2], B[k], mm);
-        else if (B.length === 1) m.face(A[k], A[k2], B[0], mm);
-        else m.quad(A[k], A[k2], B[k2], B[k], mm);
+    if (y >= NECK_TOP && y <= NECK_BOT) {
+      var s = (y - NECK_TOP) / (NECK_BOT - NECK_TOP);
+      var rn = 0.074 + 0.060 * s * s;
+      if (ax < rn) {
+        best = Math.sqrt(1 - (ax / rn) * (ax / rn)) * rn * 1.15 - 0.10;
       }
     }
 
-    // neck stub so the head does not float
-    addLathe(m, [[0.075, -0.40], [0.095, -0.62], [0.115, -0.80]], 20, M_SKIN, 0.85);
+    if (y >= 0.5) {
+      var u = Math.min(1, (y - 0.5) / 0.4);
+      var w = 0.1 + 0.32 * Math.pow(u, 0.55);
+      if (ax < w) {
+        var k = ax / w;
+        var z = 0.23 * Math.sqrt(1 - k * k) - 0.05;
 
-    m.smoothNormals();
-    return m.pack();
-  })();
+        // rounded shoulder caps out near the ends
+        var sh = (ax - w * 0.78) / (w * 0.26);
+        if (sh > -1 && sh < 1) z += 0.055 * (1 - sh * sh);
 
-  /* ---- ground: a tessellated strip, denser toward the camera ---- */
-  var groundMesh = (function () {
-    var m = new Mesh();
-    var zs = [];
-    for (var i = 0; i <= 30; i++) {
-      var k = i / 30;
-      zs.push(14 - 96 * (k * k * 0.82 + k * 0.18));  // spacing grows with distance
-    }
-    var xs = [-26, -14, -8.2, -6.2, -4.1, -3.9, -0.16, 0.16, 3.9, 4.1, 6.2, 8.2, 14, 26];
-    var grid = [];
-    for (var r = 0; r < zs.length; r++) {
-      var row = [];
-      for (var c = 0; c < xs.length; c++) row.push(m.vert(xs[c], 0, zs[r]));
-      grid.push(row);
-    }
-    for (var rr = 0; rr < zs.length - 1; rr++) {
-      for (var cc = 0; cc < xs.length - 1; cc++) {
-        var xm = (xs[cc] + xs[cc + 1]) / 2;
-        var ax = Math.abs(xm);
-        var mat = ax > 4.0 ? M_SHOULDER : M_ASPHALT;
-        if (ax > 3.88 && ax < 4.02) mat = M_PAINT;          // edge lines
-        m.quad(grid[rr][cc], grid[rr][cc + 1], grid[rr + 1][cc + 1], grid[rr + 1][cc], mat);
+        // collarbone ridges, and the hollow between them
+        var cb = (y - (0.615 + 0.10 * k * k)) / 0.030;
+        if (cb > -1 && cb < 1 && ax < w * 0.92) z += 0.030 * (1 - cb * cb);
+        var st = ax / 0.055;
+        if (st < 1 && y > 0.63) z -= 0.028 * (1 - st * st) * smoothstep((y - 0.63) / 0.10);
+
+        if (best === null || z > best) best = z;
       }
     }
-    return m.pack();
-  })();
-
-  /* ---- one dashed centre-line segment, instanced along the road ---- */
-  var dashMesh = (function () {
-    var m = new Mesh();
-    addBox(m, 0, 0.012, 0, 0.22, 0.02, 2.0, M_PAINT);
-    return m.pack();
-  })();
-
-  /* ==================================================================
-     5. RASTERISER
-        Perspective projection into the character grid, with a depth
-        buffer and per-vertex luminance interpolation.
-     ================================================================== */
-
-  var cols = 0, rows = 0, focal = 0;
-  var lumBuf = null, zBuf = null;
-
-  // scratch space for the transform pipeline
-  var vX = new Float32Array(3), vY = new Float32Array(3), vZ = new Float32Array(3);
-  var vL = new Float32Array(3);
-
-  var cam = {
-    ex: 0, ey: 0, ez: 0,
-    // camera basis vectors
-    rx: 1, ry: 0, rz: 0,
-    ux: 0, uy: 1, uz: 0,
-    fx: 0, fy: 0, fz: -1
-  };
-
-  function setCamera(ex, ey, ez, tx, ty, tz) {
-    cam.ex = ex; cam.ey = ey; cam.ez = ez;
-    var fx = tx - ex, fy = ty - ey, fz = tz - ez;
-    var fl = Math.hypot(fx, fy, fz) || 1;
-    fx /= fl; fy /= fl; fz /= fl;
-    // right = forward x worldUp
-    var rx = fy * 0 - fz * 1, ry = fz * 0 - fx * 0, rz = fx * 1 - fy * 0;
-    var rl = Math.hypot(rx, ry, rz) || 1;
-    rx /= rl; ry /= rl; rz /= rl;
-    // up = right x forward
-    var ux = ry * fz - rz * fy, uy = rz * fx - rx * fz, uz = rx * fy - ry * fx;
-    cam.fx = fx; cam.fy = fy; cam.fz = fz;
-    cam.rx = rx; cam.ry = ry; cam.rz = rz;
-    cam.ux = ux; cam.uy = uy; cam.uz = uz;
+    return best;
   }
 
-  /** World point to view space; view looks down -Z. */
-  function toView(x, y, z, out, i) {
-    var dx = x - cam.ex, dy = y - cam.ey, dz = z - cam.ez;
-    out[0] = dx * cam.rx + dy * cam.ry + dz * cam.rz;
-    out[1] = dx * cam.ux + dy * cam.uy + dz * cam.uz;
-    out[2] = -(dx * cam.fx + dy * cam.fy + dz * cam.fz);
+  /* ---- composite: whichever surface is nearest the viewer wins ---- */
+
+  var K_NONE = 0, K_SKIN = 1, K_EYE = 2, K_BODY = 3;
+
+  var _z = 0, _kind = K_NONE;
+
+  function sample(x, y) {
+    var hz = headZ(x, y);
+    var bz = bodyZ(x, y);
+
+    if (hz === null && bz === null) {
+      _kind = K_NONE;
+      _z = 0;
+      return false;
+    }
+    if (hz !== null && (bz === null || hz >= bz)) {
+      _z = hz;
+      _kind = eyeFactor(x, y) > 0 ? K_EYE : K_SKIN;
+      return true;
+    }
+    _z = bz;
+    _kind = K_BODY;
+    return true;
   }
 
-  var NEAR = 0.08;
-  var _v = new Float32Array(3);
-
-  /** Fill one triangle given view-space corners and per-corner luminance. */
-  function rasterView(ax, ay, az, bx, by, bz, cx2, cy2, cz2, la, lb, lc, additive) {
-    // near-plane clip (view z is negative in front of the camera)
-    var inA = az <= -NEAR, inB = bz <= -NEAR, inC = cz2 <= -NEAR;
-    var cnt = (inA ? 1 : 0) + (inB ? 1 : 0) + (inC ? 1 : 0);
-    if (cnt === 0) return;
-
-    if (cnt === 3) {
-      emit(ax, ay, az, bx, by, bz, cx2, cy2, cz2, la, lb, lc, additive);
-      return;
-    }
-
-    // order so that A is on its own side of the plane
-    var P = [[ax, ay, az, la], [bx, by, bz, lb], [cx2, cy2, cz2, lc]];
-    var inside = [], outside = [];
-    for (var i = 0; i < 3; i++) (P[i][2] <= -NEAR ? inside : outside).push(P[i]);
-
-    function split(a, b) {  // point on segment a->b at the near plane
-      var k = (-NEAR - a[2]) / (b[2] - a[2]);
-      return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, -NEAR, a[3] + (b[3] - a[3]) * k];
-    }
-
-    if (inside.length === 1) {
-      var q1 = split(inside[0], outside[0]);
-      var q2 = split(inside[0], outside[1]);
-      emit(inside[0][0], inside[0][1], inside[0][2], q1[0], q1[1], q1[2], q2[0], q2[1], q2[2],
-           inside[0][3], q1[3], q2[3], additive);
-    } else {
-      var r1 = split(inside[0], outside[0]);
-      var r2 = split(inside[1], outside[0]);
-      emit(inside[0][0], inside[0][1], inside[0][2], inside[1][0], inside[1][1], inside[1][2],
-           r2[0], r2[1], r2[2], inside[0][3], inside[1][3], r2[3], additive);
-      emit(inside[0][0], inside[0][1], inside[0][2], r2[0], r2[1], r2[2], r1[0], r1[1], r1[2],
-           inside[0][3], r2[3], r1[3], additive);
-    }
-  }
-
-  function emit(ax, ay, az, bx, by, bz, cx2, cy2, cz2, la, lb, lc, additive) {
-    var hw = cols / 2, hh = rows / 2;
-    var wa = -1 / az, wb = -1 / bz, wc = -1 / cz2;
-    var x0 = hw + ax * wa * focal, y0 = hh - ay * wa * focal;
-    var x1 = hw + bx * wb * focal, y1 = hh - by * wb * focal;
-    var x2 = hw + cx2 * wc * focal, y2 = hh - cy2 * wc * focal;
-
-    var area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-    if (area === 0) return;
-    if (!additive && area > 0) return;       // back-face cull
-    var inv = 1 / area;
-
-    var minX = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
-    var maxX = Math.min(cols - 1, Math.ceil(Math.max(x0, x1, x2)));
-    var minY = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
-    var maxY = Math.min(rows - 1, Math.ceil(Math.max(y0, y1, y2)));
-    if (minX > maxX || minY > maxY) return;
-
-    for (var py = minY; py <= maxY; py++) {
-      var fy = py + 0.5;
-      var rowOff = py * cols;
-      for (var px = minX; px <= maxX; px++) {
-        var fx = px + 0.5;
-        var w0 = ((x1 - fx) * (y2 - fy) - (x2 - fx) * (y1 - fy)) * inv;
-        if (w0 < 0) continue;
-        var w1 = ((x2 - fx) * (y0 - fy) - (x0 - fx) * (y2 - fy)) * inv;
-        if (w1 < 0) continue;
-        var w2 = 1 - w0 - w1;
-        if (w2 < 0) continue;
-
-        var wz = w0 * wa + w1 * wb + w2 * wc;   // 1/z, larger is nearer
-        var idx = rowOff + px;
-        if (additive) {
-          lumBuf[idx] += w0 * la + w1 * lb + w2 * lc;
-        } else if (wz > zBuf[idx]) {
-          zBuf[idx] = wz;
-          lumBuf[idx] = w0 * la + w1 * lb + w2 * lc;
-        }
-      }
-    }
-  }
-
-  /* ---- lighting ---- */
-
-  var light = { x: -0.45, y: 0.82, z: 0.35 };   // direction toward the light
-  var fogNear = 12, fogFar = 62;
-
-  function fog(depth) {
-    return 1 - smoothstep((depth - fogNear) / (fogFar - fogNear));
-  }
-
-  /**
-   * Draw a mesh under a translate / rotate-Y / uniform-scale transform.
-   * `glowFn` optionally adds extra light at a world position (headlights,
-   * the tractor beam) so surfaces respond to the scene, not just the key.
-   */
-  function drawMesh(mesh, tx, ty, tz, rotY, scale, tilt, glowFn) {
-    var cy = Math.cos(rotY), sy = Math.sin(rotY);
-    var ct = Math.cos(tilt || 0), st = Math.sin(tilt || 0);
-    var pos = mesh.pos, tri = mesh.tri, mats = mesh.mat, nrm = mesh.nrm;
-    var nv = pos.length / 3;
-
-    // transform vertices to world, then to view
-    var wpos = drawMesh._w;
-    if (!wpos || wpos.length < nv * 3) wpos = drawMesh._w = new Float32Array(nv * 3);
-    var vpos = drawMesh._v;
-    if (!vpos || vpos.length < nv * 3) vpos = drawMesh._v = new Float32Array(nv * 3);
-    var vlum = drawMesh._l;
-    if (!vlum || vlum.length < nv) vlum = drawMesh._l = new Float32Array(nv);
-    var vspc = drawMesh._s;
-    if (!vspc || vspc.length < nv) vspc = drawMesh._s = new Float32Array(nv);
-
-    for (var i = 0; i < nv; i++) {
-      var x = pos[i * 3] * scale, y = pos[i * 3 + 1] * scale, z = pos[i * 3 + 2] * scale;
-      // tilt about X, then spin about Y
-      var y2 = y * ct - z * st, z2 = y * st + z * ct;
-      var x3 = x * cy + z2 * sy, z3 = -x * sy + z2 * cy;
-      var wx = x3 + tx, wy = y2 + ty, wz = z3 + tz;
-      wpos[i * 3] = wx; wpos[i * 3 + 1] = wy; wpos[i * 3 + 2] = wz;
-      toView(wx, wy, wz, _v);
-      vpos[i * 3] = _v[0]; vpos[i * 3 + 1] = _v[1]; vpos[i * 3 + 2] = _v[2];
-
-      if (nrm) {
-        var nx = nrm[i * 3], ny = nrm[i * 3 + 1], nz = nrm[i * 3 + 2];
-        var ny2 = ny * ct - nz * st, nz2 = ny * st + nz * ct;
-        var nx3 = nx * cy + nz2 * sy, nz3 = -nx * sy + nz2 * cy;
-        var d = nx3 * light.x + ny2 * light.y + nz3 * light.z;
-        vlum[i] = d > 0 ? d : 0;
-        if (glowFn) vlum[i] += glowFn(wx, wy, wz, nx3, ny2, nz3);
-
-        // half-vector specular, so wet surfaces catch a moving glint
-        var ex = cam.ex - wx, ey = cam.ey - wy, ez = cam.ez - wz;
-        var el = Math.sqrt(ex * ex + ey * ey + ez * ez) || 1;
-        var hx = light.x + ex / el, hy = light.y + ey / el, hz = light.z + ez / el;
-        var hl = Math.sqrt(hx * hx + hy * hy + hz * hz) || 1;
-        var sp = (nx3 * hx + ny2 * hy + nz3 * hz) / hl;
-        if (sp < 0) sp = 0;
-        var s2 = sp * sp, s4 = s2 * s2, s8 = s4 * s4, s16 = s8 * s8;
-        vspc[i] = s16 * s16 * (s16 * s16);
-      }
-    }
-
-    for (var f = 0; f < tri.length; f += 3) {
-      var a = tri[f], b = tri[f + 1], c = tri[f + 2];
-      var mt = MAT[mats[f / 3]];
-      var la, lb, lc;
-
-      if (mt[2] > 0) {
-        la = lb = lc = mt[2];
-      } else if (nrm) {
-        var ks = mt[3] || 0;
-        la = mt[0] + mt[1] * vlum[a] + ks * vspc[a];
-        lb = mt[0] + mt[1] * vlum[b] + ks * vspc[b];
-        lc = mt[0] + mt[1] * vlum[c] + ks * vspc[c];
-      } else {
-        // flat shading from the world-space face normal
-        var a3 = a * 3, b3 = b * 3, c3 = c * 3;
-        var ux = wpos[b3] - wpos[a3], uy = wpos[b3 + 1] - wpos[a3 + 1], uz = wpos[b3 + 2] - wpos[a3 + 2];
-        var vx = wpos[c3] - wpos[a3], vy = wpos[c3 + 1] - wpos[a3 + 1], vz = wpos[c3 + 2] - wpos[a3 + 2];
-        var fnx = uy * vz - uz * vy, fny = uz * vx - ux * vz, fnz = ux * vy - uy * vx;
-        var fl = Math.hypot(fnx, fny, fnz) || 1;
-        fnx /= fl; fny /= fl; fnz /= fl;
-        var dd = fnx * light.x + fny * light.y + fnz * light.z;
-        if (dd < 0) dd = 0;
-        var base = mt[0] + mt[1] * dd;
-        if (glowFn) {
-          var mx = (wpos[a3] + wpos[b3] + wpos[c3]) / 3;
-          var my = (wpos[a3 + 1] + wpos[b3 + 1] + wpos[c3 + 1]) / 3;
-          var mz = (wpos[a3 + 2] + wpos[b3 + 2] + wpos[c3 + 2]) / 3;
-          base += mt[1] * glowFn(mx, my, mz, fnx, fny, fnz);
-        }
-        la = lb = lc = base;
-      }
-
-      // fog on the nearest corner depth
-      var da = -vpos[a * 3 + 2], db = -vpos[b * 3 + 2], dc = -vpos[c * 3 + 2];
-      la *= fog(da); lb *= fog(db); lc *= fog(dc);
-
-      rasterView(
-        vpos[a * 3], vpos[a * 3 + 1], vpos[a * 3 + 2],
-        vpos[b * 3], vpos[b * 3 + 1], vpos[b * 3 + 2],
-        vpos[c * 3], vpos[c * 3 + 1], vpos[c * 3 + 2],
-        la, lb, lc, false
-      );
-    }
+  /** Depth only, for the finite differences. Background reads as z = 0. */
+  function sampleZOnly(x, y) {
+    var hz = headZ(x, y);
+    var bz = bodyZ(x, y);
+    if (hz === null && bz === null) return 0;
+    if (hz === null) return bz;
+    if (bz === null) return hz;
+    return hz > bz ? hz : bz;
   }
 
   /* ==================================================================
-     6. THE SEQUENCE
+     FIELD STATE
+     Geometry and normals are expensive but static, so they are baked
+     once per resize. Each frame only relights them.
      ================================================================== */
 
-  var DURATION = 10.0;
-  var T_UFO_IN   = 2.3;   // saucer enters the sky
-  var T_BRAKE    = 3.0;
-  var T_STOP     = 4.2;
-  var T_BEAM     = 5.0;
-  var T_LIFT     = 5.7;
-  var T_TAKEN    = 7.35;
-  var T_EXIT     = 7.6;
-  var T_CUT      = 8.45;  // hard cut to the Grey
+  var LEVELS = 48;
+  var DIFF_H = 0.007;        // finite-difference step, in figure units
 
-  /** Distance travelled, so the road markings scroll correctly. */
-  function roadDistance(t) {
-    var v0 = 17;
-    if (t <= T_BRAKE) return v0 * t;
-    if (t >= T_STOP) return v0 * T_BRAKE + (v0 * (T_STOP - T_BRAKE)) / 2;
-    var k = (t - T_BRAKE) / (T_STOP - T_BRAKE);
-    return v0 * T_BRAKE + v0 * (T_STOP - T_BRAKE) * (k - (k * k) / 2);
-  }
-
-  function carState(t) {
-    var s = { x: 0, y: 0, z: 0, rotY: 0, tilt: 0, taken: false };
-    if (t >= T_TAKEN) { s.taken = true; return s; }
-    if (t > T_LIFT) {
-      var k = seg(t, T_LIFT, T_TAKEN);
-      s.y = easeIn(k) * 15.5;
-      s.rotY = k * 3.4;
-      s.tilt = Math.sin(k * 4.2) * 0.22 * k;
-      s.x = Math.sin(k * 7) * 0.25 * k;
-    }
-    return s;
-  }
-
-  function ufoState(t) {
-    var u = { x: 0, y: 40, z: -6, rotY: t * 2.1, on: false };
-    if (t < T_UFO_IN) return u;
-    u.on = true;
-    var descend = easeOut(seg(t, T_UFO_IN, T_BEAM));
-    u.y = lerp(34, 8.6, descend);
-    u.x = lerp(7.5, 0, descend) + Math.sin(t * 1.7) * 0.22;
-    u.z = lerp(-26, -1.2, descend);
-    if (t > T_EXIT) {
-      var e = seg(t, T_EXIT, T_CUT);
-      u.y += easeIn(e) * 90;
-      u.rotY += e * 9;
-    }
-    return u;
-  }
-
-  function beamStrength(t) {
-    if (t < T_BEAM) return 0;
-    if (t < T_LIFT) return smoothstep(seg(t, T_BEAM, T_LIFT));
-    if (t < T_TAKEN) return 1;
-    return 1 - smoothstep(seg(t, T_TAKEN, T_EXIT));
-  }
-
-  /* ---- camera per shot ---- */
-  function shotCamera(t) {
-    if (t < T_BRAKE) {
-      // chase: low and close behind the car
-      var k = t / T_BRAKE;
-      setCamera(2.15 - 0.5 * k, 1.70, 5.3, 0.15, 1.05, -9);
-    } else if (t < T_LIFT) {
-      // the saucer arrives: drop down, look up past the roof
-      var k2 = seg(t, T_BRAKE, T_LIFT);
-      setCamera(5.4 - 1.2 * k2, 1.5 + 0.6 * k2, 6.2 - 0.7 * k2, 0, 2.6 + 3.4 * k2, -1.4);
-    } else if (t < T_EXIT) {
-      // abduction: slow orbit while the car climbs
-      var k3 = seg(t, T_LIFT, T_EXIT);
-      var a = -0.62 + k3 * 0.85;
-      var rad = 9.6 - 1.1 * k3;
-      setCamera(Math.sin(a) * rad, 2.3 + 3.6 * k3, Math.cos(a) * rad - 1.2,
-                0, 3.2 + 7.0 * k3, -1.2);
-    } else if (t < T_CUT) {
-      // empty road, looking up after it
-      var k4 = seg(t, T_EXIT, T_CUT);
-      setCamera(3.0, 1.6, 5.2, 0.6, 3.4 + 13 * k4, -3);
-    } else {
-      // the Grey
-      var k5 = seg(t, T_CUT, DURATION);
-      setCamera(Math.sin(k5 * 0.5) * 0.10, 0.10 + 0.03 * k5, 1.78 - 0.18 * easeOut(k5),
-                0, 0.10, 0);
-    }
-  }
-
-  /* ---- glow contributions ---- */
-  var glowState = { head: 0, beam: 0, beamX: 0, beamZ: 0, ufoY: 0 };
-
-  function sceneGlow(x, y, z, nx, ny, nz) {
-    var add = 0;
-
-    // headlights: a pool of light thrown forward along -Z
-    if (glowState.head > 0) {
-      var hx = x - 0, hz = z - (-4.2);
-      var d2 = hx * hx + hz * hz + y * y * 2.2;
-      add += (glowState.head * 9.5) / (d2 + 5.0);
-    }
-
-    // the beam lights whatever is inside it from above
-    if (glowState.beam > 0) {
-      var bx = x - glowState.beamX, bz = z - glowState.beamZ;
-      var r = Math.sqrt(bx * bx + bz * bz);
-      var fall = 1 - smoothstep((r - 1.1) / 2.6);
-      if (fall > 0) {
-        var up = ny > 0 ? ny : 0;
-        add += glowState.beam * fall * (0.30 + 0.75 * up);
-      }
-    }
-    return add;
-  }
-
-  /* ==================================================================
-     7. DIGIT OUTPUT
-     ================================================================== */
-
-  var LEVELS = 44;
-  var pitch = 13, fontPx = 10, w = 0, h = 0, n = 0;
-  var bits, flipAt, cellX, cellY, levelOf, order;
-  var counts = new Uint32Array(LEVELS), offsets = new Uint32Array(LEVELS);
+  var w = 0, h = 0, cols = 0, rows = 0, pitch = 14, fontPx = 11;
+  var figS = 1, figCX = 0, figCY = 0;
+  var t = 0, raf = 0, running = false;
+  var enabled = !reduce.matches;
+  var canHover = fine.matches;
   var baselineRatio = 0.35;
-  var A_AMBIENT = 0.075;
+  var n = 0;
 
-  var mono = '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  var bits = new Uint8Array(0);
+  var flipAt = new Float32Array(0);
+  var cellX = new Float32Array(0);      // screen px
+  var cellY = new Float32Array(0);
+  var fx = new Float32Array(0);         // figure units
+  var fy = new Float32Array(0);
+  var fz = new Float32Array(0);
+  var nrmX = new Float32Array(0);
+  var nrmY = new Float32Array(0);
+  var nrmZ = new Float32Array(0);
+  var kind = new Uint8Array(0);
+
+  var levelOf = new Uint8Array(0);
+  var counts = new Uint32Array(LEVELS);
+  var offsets = new Uint32Array(LEVELS);
+  var order = new Uint32Array(0);
+
+  var pointer = { x: -9999, y: -9999, active: false };
+  var last = { x: -9999, y: -9999 };
+
+  var LENS_R = 150;
+  var LENS_R2 = LENS_R * LENS_R;
+  var PUSH_EXP = 0.476;
+  var MAX_SCALE = 1.15;
+
+  // the light is a point in space; it drifts toward the pointer
+  var LIGHT_HOME_X = -0.52, LIGHT_HOME_Y = -0.66;
+  var lightX = LIGHT_HOME_X, lightY = LIGHT_HOME_Y;
+  var LIGHT_Z = 1.25;
+
+  var A_AMBIENT = 0.085;     // the field of digits behind the figure
+
+  var mono =
+    '"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
   function measureBaseline() {
     ctx.font = "100px " + mono;
     var m = ctx.measureText("0");
-    var a = m.actualBoundingBoxAscent, d = m.actualBoundingBoxDescent;
+    var a = m.actualBoundingBoxAscent;
+    var d = m.actualBoundingBoxDescent;
     if (a) baselineRatio = (a - d) / 200;
   }
 
   function build() {
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
-    w = stage.clientWidth; h = stage.clientHeight;
+    w = stage.clientWidth;
+    h = stage.clientHeight;
     if (!w || !h) return;
 
     canvas.width = Math.round(w * dpr);
@@ -842,226 +403,205 @@
     canvas.style.height = h + "px";
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    pitch = clamp(Math.min(w, h) / 62, 9, 15);
-    fontPx = Math.max(7, Math.round(pitch * 0.78));
+    figS = Math.min(h * 0.44, w * 0.6);
+    figCX = w / 2;
+    figCY = h * 0.46;
+
+    pitch = Math.max(9, Math.min(16, figS / 34));
+    fontPx = Math.max(7, Math.round(pitch * 0.76));
     measureBaseline();
 
-    cols = Math.ceil(w / pitch) + 1;
-    rows = Math.ceil(h / pitch) + 1;
+    cols = Math.ceil(w / pitch) + 2;
+    rows = Math.ceil(h / pitch) + 2;
     n = cols * rows;
 
-    // vertical field of view of about 52 degrees
-    focal = (rows / 2) / Math.tan((52 * Math.PI) / 180 / 2);
-
-    lumBuf = new Float32Array(n);
-    zBuf = new Float32Array(n);
     bits = new Uint8Array(n);
     flipAt = new Float32Array(n);
     cellX = new Float32Array(n);
     cellY = new Float32Array(n);
+    fx = new Float32Array(n);
+    fy = new Float32Array(n);
+    fz = new Float32Array(n);
+    nrmX = new Float32Array(n);
+    nrmY = new Float32Array(n);
+    nrmZ = new Float32Array(n);
+    kind = new Uint8Array(n);
     levelOf = new Uint8Array(n);
     order = new Uint32Array(n);
 
     var offX = (w - (cols - 1) * pitch) / 2;
     var offY = (h - (rows - 1) * pitch) / 2;
+
     for (var r = 0; r < rows; r++) {
       for (var c = 0; c < cols; c++) {
         var i = r * cols + c;
-        cellX[i] = offX + pitch * c;
-        cellY[i] = offY + pitch * r;
+        var px = offX + pitch * c;
+        var py = offY + pitch * r;
+        cellX[i] = px;
+        cellY[i] = py;
+
         bits[i] = Math.random() < 0.5 ? 0 : 1;
         flipAt[i] = 0.08 + 0.5 * Math.random();
-      }
-    }
-  }
 
-  /* ---- stars, fixed in a hemisphere ---- */
-  var STARS = [];
-  (function () {
-    for (var i = 0; i < 150; i++) {
-      var a = Math.random() * Math.PI * 2;
-      var e = Math.random() * 0.9 + 0.05;
-      STARS.push([Math.cos(a) * Math.cos(e) * 300, Math.sin(e) * 300, Math.sin(a) * Math.cos(e) * 300,
-                  0.18 + Math.random() * 0.5]);
-    }
-  })();
+        var X = (px - figCX) / figS;
+        var Y = (py - figCY) / figS;
+        fx[i] = X;
+        fy[i] = Y;
 
-  /* ==================================================================
-     8. FRAME
-     ================================================================== */
-
-  var pointer = { x: -9999, y: -9999, active: false };
-  var last = { x: -9999, y: -9999 };
-  var LENS_R = 150, LENS_R2 = LENS_R * LENS_R, PUSH_EXP = 0.476, MAX_SCALE = 1.15;
-
-  var clock = 0, raf = 0, running = false;
-  var enabled = !reduce.matches;
-  var canHover = fine.matches;
-  var lastMs = 0;
-
-  function renderScene(t) {
-    lumBuf.fill(0);
-    zBuf.fill(0);
-
-    shotCamera(t);
-
-    var isGrey = t >= T_CUT;
-    var car = carState(t);
-    var ufo = ufoState(t);
-    var beam = beamStrength(t);
-
-    glowState.head = t < T_TAKEN ? 1 : 0;
-    glowState.beam = beam;
-    glowState.beamX = ufo.x;
-    glowState.beamZ = ufo.z;
-
-    if (isGrey) {
-      light.x = -0.42; light.y = 0.52; light.z = 0.74;
-      var gk = seg(t, T_CUT, DURATION);
-      drawMesh(headMesh, 0, 0, 0, Math.sin(gk * 1.1) * 0.16, 1.0,
-               -0.05 + Math.sin(gk * 0.9) * 0.03, null);
-    } else {
-      light.x = -0.35; light.y = 0.86; light.z = 0.38;
-
-      // stars
-      for (var s = 0; s < STARS.length; s++) {
-        var st = STARS[s];
-        toView(st[0] + cam.ex, st[1], st[2] + cam.ez, _v);
-        if (_v[2] > -NEAR) continue;
-        var iw = -1 / _v[2];
-        var sx = Math.round(cols / 2 + _v[0] * iw * focal);
-        var sy = Math.round(rows / 2 - _v[1] * iw * focal);
-        if (sx >= 0 && sx < cols && sy >= 0 && sy < rows) {
-          var si = sy * cols + sx;
-          if (zBuf[si] === 0) lumBuf[si] = Math.max(lumBuf[si], st[3]);
+        if (!sample(X, Y)) {
+          kind[i] = K_NONE;
+          continue;
         }
-      }
+        kind[i] = _kind;
+        fz[i] = _z;
 
-      drawMesh(groundMesh, 0, 0, 0, 0, 1, 0, sceneGlow);
+        // normal from the gradient of the depth map
+        var zl = sampleZOnly(X - DIFF_H, Y);
+        var zr = sampleZOnly(X + DIFF_H, Y);
+        var zu = sampleZOnly(X, Y - DIFF_H);
+        var zd = sampleZOnly(X, Y + DIFF_H);
 
-      // centre-line dashes scrolling toward the camera
-      var dist = roadDistance(t);
-      var spacing = 9.0;
-      var phase = dist % spacing;
-      for (var d = 0; d < 11; d++) {
-        var dz = 12 - d * spacing - (spacing - phase);
-        if (dz < -80) continue;
-        drawMesh(dashMesh, 0, 0, dz, 0, 1, 0, sceneGlow);
-      }
-
-      if (!car.taken) {
-        drawMesh(carMesh, car.x, car.y, car.z, car.rotY, 1, car.tilt, sceneGlow);
-      }
-
-      if (ufo.on) {
-        drawMesh(ufoMesh, ufo.x, ufo.y, ufo.z, ufo.rotY, 2.4, 0, null);
-        drawMesh(rimMesh, ufo.x, ufo.y - 0.02, ufo.z, ufo.rotY, 2.4, 0, null);
-      }
-
-      // the beam, as an additive cone in screen space
-      if (beam > 0.01) {
-        drawBeam(ufo, beam, t);
+        var gx = (zr - zl) / (2 * DIFF_H);
+        var gy = (zd - zu) / (2 * DIFF_H);
+        var nx = -gx, ny = -gy, nz = 1;
+        var len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        nrmX[i] = nx / len;
+        nrmY[i] = ny / len;
+        nrmZ[i] = nz / len;
       }
     }
   }
 
-  /** Screen-space volumetric cone from the saucer's emitter to the road. */
-  function drawBeam(ufo, strength, t) {
-    toView(ufo.x, ufo.y - 0.8, ufo.z, _v);
-    if (_v[2] > -NEAR) return;
-    var wA = -1 / _v[2];
-    var ax = cols / 2 + _v[0] * wA * focal;
-    var ay = rows / 2 - _v[1] * wA * focal;
-    var apexR = 1.0 * wA * focal;
+  /* ---- shading ---- */
 
-    toView(ufo.x, 0.02, ufo.z, _v);
-    if (_v[2] > -NEAR) return;
-    var wB = -1 / _v[2];
-    var bx = cols / 2 + _v[0] * wB * focal;
-    var by = rows / 2 - _v[1] * wB * focal;
-    var baseR = 3.1 * wB * focal;
+  function shade(i) {
+    var nx = nrmX[i], ny = nrmY[i], nz = nrmZ[i];
 
-    var dx = bx - ax, dy = by - ay;
-    var len2 = dx * dx + dy * dy;
-    if (len2 < 1) return;
+    var lx = lightX - fx[i];
+    var ly = lightY - fy[i];
+    var lz = LIGHT_Z - fz[i];
+    var ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
+    lx /= ll; ly /= ll; lz /= ll;
 
-    var flicker = 0.86 + 0.14 * Math.sin(t * 38) * Math.sin(t * 17);
-    var minX = Math.max(0, Math.floor(Math.min(ax - apexR, bx - baseR)));
-    var maxX = Math.min(cols - 1, Math.ceil(Math.max(ax + apexR, bx + baseR)));
-    var minY = Math.max(0, Math.floor(Math.min(ay, by) - 2));
-    var maxY = Math.min(rows - 1, Math.ceil(Math.max(ay, by) + 2));
+    var diff = nx * lx + ny * ly + nz * lz;
+    if (diff < 0) diff = 0;
 
-    for (var py = minY; py <= maxY; py++) {
-      for (var px = minX; px <= maxX; px++) {
-        var rx = px + 0.5 - ax, ry = py + 0.5 - ay;
-        var u = (rx * dx + ry * dy) / len2;
-        if (u < 0 || u > 1) continue;
-        var cxp = rx - dx * u, cyp = ry - dy * u;
-        var dist = Math.sqrt(cxp * cxp + cyp * cyp);
-        var width = lerp(apexR, baseR, u);
-        if (dist > width) continue;
-        var edge = 1 - dist / width;
-        var v = strength * flicker * (0.20 + 0.85 * edge * edge) * (1 - 0.35 * u);
-        lumBuf[py * cols + px] += v;
-      }
+    // grazing surfaces catch a rim light, which keeps the silhouette alive
+    var g = 1 - nz;
+    var rim = g * g * g;
+
+    var k = kind[i];
+    var lum;
+
+    if (k === K_EYE) {
+      // a dark convex lens: almost no diffuse, one tight specular glint
+      var hx = lx, hy = ly, hz = lz + 1;
+      var hl = Math.sqrt(hx * hx + hy * hy + hz * hz);
+      var sp = (nx * hx + ny * hy + nz * hz) / hl;
+      if (sp < 0) sp = 0;
+      var s2 = sp * sp; var s4 = s2 * s2; var s8 = s4 * s4;
+      var s16 = s8 * s8; var s32 = s16 * s16; var s64 = s32 * s32;
+      lum = 0.035 + 0.10 * diff + 0.95 * s64 + 0.16 * rim;
+    } else if (k === K_BODY) {
+      lum = 0.07 + 0.58 * diff + 0.24 * rim;
+    } else {
+      var hx2 = lx, hy2 = ly, hz2 = lz + 1;
+      var hl2 = Math.sqrt(hx2 * hx2 + hy2 * hy2 + hz2 * hz2);
+      var sp2 = (nx * hx2 + ny * hy2 + nz * hz2) / hl2;
+      if (sp2 < 0) sp2 = 0;
+      var p2 = sp2 * sp2; var p4 = p2 * p2; var p8 = p4 * p4; var p16 = p8 * p8;
+      lum = 0.09 + 0.80 * diff + 0.11 * p16 + 0.28 * rim;
     }
+
+    return lum > 1 ? 1 : lum;
   }
 
-  function draw(t) {
-    renderScene(t);
-
+  function draw() {
     ctx.clearRect(0, 0, w, h);
     ctx.font = fontPx + "px " + mono;
     ctx.textAlign = "center";
     ctx.textBaseline = "alphabetic";
+
     var shift = fontPx * baselineRatio;
-
-    // a burst of interference on the cut to the Grey
-    var cutNoise = 0;
-    if (t > T_CUT - 0.10 && t < T_CUT + 0.12) cutNoise = 1;
-
     var lensOn = pointer.active;
-    if (pointer.active) { last.x = pointer.x; last.y = pointer.y; }
+    if (pointer.active) {
+      last.x = pointer.x;
+      last.y = pointer.y;
+    }
     var lensX = last.x, lensY = last.y;
 
+    // ease the light toward the pointer, or back to its resting corner
+    var tx = LIGHT_HOME_X, ty = LIGHT_HOME_Y;
+    if (pointer.active) {
+      tx = (pointer.x - figCX) / figS;
+      ty = (pointer.y - figCY) / figS;
+      var m = Math.sqrt(tx * tx + ty * ty);
+      if (m > 1.6) { tx = (tx / m) * 1.6; ty = (ty / m) * 1.6; }
+    }
+    lightX += (tx - lightX) * 0.09;
+    lightY += (ty - lightY) * 0.09;
+
+    // bucket every cell by brightness (counting sort) so the frame sets
+    // fillStyle ~48 times instead of once per digit
+    var ambientLevel = Math.round(A_AMBIENT * (LEVELS - 1));
     counts.fill(0);
     for (var i = 0; i < n; i++) {
-      var v = lumBuf[i];
-      if (v <= 0.001) v = A_AMBIENT;
-      else v = A_AMBIENT * 0.5 + v;
-      if (cutNoise) v = Math.random() < 0.5 ? Math.random() * 0.9 : v * 0.3;
-      var lvl = Math.round(clamp(v, 0, 1) * (LEVELS - 1));
+      var lvl;
+      if (kind[i] === K_NONE) {
+        lvl = ambientLevel;
+      } else {
+        lvl = Math.round(shade(i) * (LEVELS - 1));
+        if (lvl < 0) lvl = 0;
+        else if (lvl > LEVELS - 1) lvl = LEVELS - 1;
+      }
       levelOf[i] = lvl;
       counts[lvl]++;
     }
     var acc = 0;
-    for (var L = 0; L < LEVELS; L++) { offsets[L] = acc; acc += counts[L]; }
-    for (var j = 0; j < n; j++) order[offsets[levelOf[j]]++] = j;
+    for (var L = 0; L < LEVELS; L++) {
+      offsets[L] = acc;
+      acc += counts[L];
+    }
+    for (var j = 0; j < n; j++) {
+      order[offsets[levelOf[j]]++] = j;
+    }
 
-    for (var lv = 1; lv < LEVELS; lv++) {
-      var startI = lv === 0 ? 0 : offsets[lv - 1];
-      var endI = offsets[lv];
-      if (endI <= startI) continue;
-      ctx.fillStyle = "rgba(247, 248, 248, " + (lv / (LEVELS - 1)).toFixed(3) + ")";
-      for (var k = startI; k < endI; k++) {
+    var start = 0;
+    for (var lv = 0; lv < LEVELS; lv++) {
+      var end = offsets[lv];
+      if (lv > 0) start = offsets[lv - 1];
+      else start = 0;
+      if (end <= start) continue;
+      if (lv === 0) continue;           // fully dark cells draw nothing
+
+      ctx.fillStyle =
+        "rgba(247, 248, 248, " + (lv / (LEVELS - 1)).toFixed(3) + ")";
+
+      for (var k = start; k < end; k++) {
         var idx = order[k];
-        if (clock >= flipAt[idx]) {
+
+        if (t >= flipAt[idx]) {
           bits[idx] = bits[idx] ? 0 : 1;
-          flipAt[idx] = clock + 0.08 + 0.5 * Math.random();
+          flipAt[idx] = t + 0.08 + 0.5 * Math.random();
         }
         var ch = bits[idx] ? "1" : "0";
-        var x = cellX[idx], y = cellY[idx];
+        var x = cellX[idx];
+        var y = cellY[idx];
 
         if (lensOn) {
-          var ddx = x - lensX, ddy = y - lensY;
-          var d2 = ddx * ddx + ddy * ddy;
+          var dx = x - lensX;
+          var dy = y - lensY;
+          var d2 = dx * dx + dy * dy;
           if (d2 < LENS_R2) {
-            var dd = Math.sqrt(d2);
-            var pushed = LENS_R * Math.pow(dd / LENS_R, PUSH_EXP);
-            var ang = Math.atan2(ddy, ddx);
-            var sc = 1 + MAX_SCALE * smoothstep(1 - dd / LENS_R);
+            var d = Math.sqrt(d2);
+            var pushed = LENS_R * Math.pow(d / LENS_R, PUSH_EXP);
+            var ang = Math.atan2(dy, dx);
+            var sc = 1 + MAX_SCALE * smoothstep(1 - d / LENS_R);
             ctx.save();
-            ctx.translate(lensX + Math.cos(ang) * pushed, lensY + Math.sin(ang) * pushed + shift);
+            ctx.translate(
+              lensX + Math.cos(ang) * pushed,
+              lensY + Math.sin(ang) * pushed + shift
+            );
             ctx.scale(sc, sc);
             ctx.fillText(ch, 0, 0);
             ctx.restore();
@@ -1074,34 +614,37 @@
 
     if (lensEl) {
       lensEl.style.opacity = lensOn ? "1" : "0";
-      if (lensOn) lensEl.style.transform = "translate(" + lensX + "px," + lensY + "px)";
+      if (lensOn)
+        lensEl.style.transform = "translate(" + lensX + "px," + lensY + "px)";
     }
   }
 
-  function frame(ms) {
+  function frame() {
     if (!enabled) return;
-    var dt = lastMs ? Math.min(0.05, (ms - lastMs) / 1000) : 0.016;
-    lastMs = ms;
-    clock += dt;
-    draw(clock % DURATION);
+    t += 0.016;
+    draw();
     raf = requestAnimationFrame(frame);
   }
 
-  /* ==================================================================
-     9. INPUT AND LIFECYCLE
-     ================================================================== */
+  /* ---- pointer ---- */
 
-  function setPointer(cx2, cy2) {
+  function setPointer(clientX, clientY) {
     var rect = stage.getBoundingClientRect();
-    var x = cx2 - rect.left, y = cy2 - rect.top;
-    pointer.x = x; pointer.y = y;
+    var x = clientX - rect.left;
+    var y = clientY - rect.top;
+    pointer.x = x;
+    pointer.y = y;
     pointer.active = x >= 0 && x <= rect.width && y >= 0 && y <= rect.height;
   }
-  function onMouseMove(e) { if (canHover) setPointer(e.clientX, e.clientY); }
+
+  function onMouseMove(e) {
+    if (!canHover) return;
+    setPointer(e.clientX, e.clientY);
+  }
   function onLeave() { pointer.active = false; }
   function onTouch(e) {
-    var tch = e.touches && e.touches[0];
-    if (tch) setPointer(tch.clientX, tch.clientY);
+    var touch = e.touches && e.touches[0];
+    if (touch) setPointer(touch.clientX, touch.clientY);
   }
   function onTouchEnd() { pointer.active = false; }
 
@@ -1127,7 +670,6 @@
   function start() {
     if (running) return;
     running = true;
-    lastMs = 0;
     bind();
     raf = requestAnimationFrame(frame);
   }
@@ -1137,23 +679,29 @@
     raf = 0;
     unbind();
   }
+
   function rebuild() {
     build();
-    if (!enabled) draw(T_CUT + 0.9);
+    if (!enabled) draw();
   }
 
   build();
   if (enabled) start();
-  else draw(T_CUT + 0.9);   // reduced motion: hold on the Grey
+  else draw();
 
-  if (typeof ResizeObserver !== "undefined") new ResizeObserver(rebuild).observe(stage);
-  else window.addEventListener("resize", rebuild);
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(rebuild);
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(rebuild).observe(stage);
+  } else {
+    window.addEventListener("resize", rebuild);
+  }
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(rebuild);
+  }
 
   reduce.addEventListener("change", function (e) {
     enabled = !e.matches;
     if (enabled) start();
-    else { stop(); draw(T_CUT + 0.9); }
+    else { stop(); draw(); }
   });
   fine.addEventListener("change", function (e) {
     canHover = e.matches;
